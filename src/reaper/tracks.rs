@@ -1,31 +1,19 @@
-//! Reaper Tracks provider.
-//!
-//! Sources tracks from the current Reaper project.
-//! In a full integration this reads live track data via reaper-rs.
+//! DAW Tracks provider — live track data from the current project.
 
 use launcher_core::{
     ActionModifier, ActivationResult, Item, ItemAction, Provider, ProviderConfig,
 };
 
-pub struct ReaperTracksProvider {
+pub struct DawTracksProvider {
     config: ProviderConfig,
-    tracks: Vec<TrackEntry>,
+    tracks: Vec<Item>,
 }
 
-struct TrackEntry {
-    id: String,
-    name: String,
-    index: usize,
-    is_folder: bool,
-    muted: bool,
-    soloed: bool,
-}
-
-impl ReaperTracksProvider {
+impl DawTracksProvider {
     pub fn new() -> Self {
         Self {
             config: ProviderConfig {
-                name: "reaper-tracks".into(),
+                name: "tracks".into(),
                 icon: "T".into(),
                 prefix: Some('t'),
                 default_tags: vec!["reaper/tracks".into()],
@@ -34,66 +22,99 @@ impl ReaperTracksProvider {
             tracks: Vec::new(),
         }
     }
+
+    fn refresh(&mut self) {
+        let Some(daw) = daw::get() else { return; };
+
+        let tracks = daw::block_on(async {
+            let project = daw.current_project().await.ok()?;
+            project.tracks().all().await.ok()
+        })
+        .flatten();
+
+        let Some(tracks) = tracks else { return; };
+
+        self.tracks = tracks
+            .iter()
+            .map(|track| {
+                let status = match (track.muted, track.soloed, track.armed) {
+                    (true, _, _) => " [muted]",
+                    (_, true, _) => " [solo]",
+                    (_, _, true) => " [armed]",
+                    _ => "",
+                };
+                let sub = format!(
+                    "Track {}{}{}",
+                    track.index + 1,
+                    if track.is_folder { " (folder)" } else { "" },
+                    status
+                );
+
+                Item::new(&track.guid, &track.name, "tracks")
+                    .with_sub(&sub)
+                    .with_icon(if track.is_folder { "F" } else { "T" })
+                    .with_search_fields(vec![track.name.clone()])
+                    .with_actions(vec![
+                        ItemAction::new("Select", format!("daw:track-select:{}", track.guid)),
+                        ItemAction::new("Solo", format!("daw:track-solo:{}", track.guid))
+                            .with_modifier(ActionModifier::Shift)
+                            .with_keep_open(),
+                        ItemAction::new("Mute", format!("daw:track-mute:{}", track.guid))
+                            .with_modifier(ActionModifier::Ctrl)
+                            .with_keep_open(),
+                        ItemAction::new("Show FX", format!("daw:track-fx:{}", track.guid))
+                            .with_modifier(ActionModifier::Alt),
+                    ])
+            })
+            .collect();
+
+        tracing::info!(count = self.tracks.len(), "Refreshed tracks from DAW");
+    }
 }
 
-impl Provider for ReaperTracksProvider {
-    fn name(&self) -> &str { "reaper-tracks" }
+impl Provider for DawTracksProvider {
+    fn name(&self) -> &str { "tracks" }
     fn config(&self) -> &ProviderConfig { &self.config }
     fn config_mut(&mut self) -> &mut ProviderConfig { &mut self.config }
 
     fn setup(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // TODO: Read from Reaper project via reaper-rs
-        self.tracks = demo_tracks();
-        tracing::info!(count = self.tracks.len(), "Loaded Reaper tracks");
+        self.refresh();
         Ok(())
     }
 
-    fn query(&self, _query: &str, _exact: bool) -> Result<Vec<Item>, Box<dyn std::error::Error + Send + Sync>> {
-        let items = self.tracks.iter().map(|track| {
-            let status = match (track.muted, track.soloed) {
-                (true, _) => " [muted]",
-                (_, true) => " [solo]",
-                _ => "",
-            };
-            let sub = format!("Track {}{}{}", track.index + 1,
-                if track.is_folder { " (folder)" } else { "" }, status);
-
-            Item::new(&track.id, &track.name, "reaper-tracks")
-                .with_sub(&sub)
-                .with_icon(if track.is_folder { "F" } else { "T" })
-                .with_search_fields(vec![track.name.clone()])
-                .with_actions(vec![
-                    ItemAction::new("Select", format!("reaper:track-select:{}", track.index)),
-                    ItemAction::new("Solo", format!("reaper:track-solo:{}", track.index))
-                        .with_modifier(ActionModifier::Shift),
-                    ItemAction::new("Mute", format!("reaper:track-mute:{}", track.index))
-                        .with_modifier(ActionModifier::Ctrl),
-                    ItemAction::new("Show FX", format!("reaper:track-fx:{}", track.index))
-                        .with_modifier(ActionModifier::Alt),
-                ])
-        }).collect();
-        Ok(items)
+    fn query(&self, _q: &str, _exact: bool) -> Result<Vec<Item>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.tracks.clone())
     }
 
     fn activate(&self, item: &Item, action: &str) -> Result<ActivationResult, Box<dyn std::error::Error + Send + Sync>> {
-        tracing::info!(action = action, item = %item.label, "Reaper track action");
-        Ok(ActivationResult::Close)
-    }
-}
+        let Some(daw) = daw::get() else { return Ok(ActivationResult::Close); };
 
-fn demo_tracks() -> Vec<TrackEntry> {
-    vec![
-        TrackEntry { id: "trk-master".into(), name: "Master".into(), index: 0, is_folder: false, muted: false, soloed: false },
-        TrackEntry { id: "trk-drums".into(), name: "Drums".into(), index: 1, is_folder: true, muted: false, soloed: false },
-        TrackEntry { id: "trk-kick".into(), name: "Kick".into(), index: 2, is_folder: false, muted: false, soloed: false },
-        TrackEntry { id: "trk-snare".into(), name: "Snare".into(), index: 3, is_folder: false, muted: false, soloed: false },
-        TrackEntry { id: "trk-hihat".into(), name: "Hi-Hat".into(), index: 4, is_folder: false, muted: false, soloed: false },
-        TrackEntry { id: "trk-bass".into(), name: "Bass".into(), index: 5, is_folder: false, muted: false, soloed: false },
-        TrackEntry { id: "trk-guitars".into(), name: "Guitars".into(), index: 6, is_folder: true, muted: false, soloed: false },
-        TrackEntry { id: "trk-gtr-l".into(), name: "Guitar L".into(), index: 7, is_folder: false, muted: false, soloed: false },
-        TrackEntry { id: "trk-gtr-r".into(), name: "Guitar R".into(), index: 8, is_folder: false, muted: false, soloed: false },
-        TrackEntry { id: "trk-vocals".into(), name: "Lead Vocals".into(), index: 9, is_folder: false, muted: false, soloed: false },
-        TrackEntry { id: "trk-bgv".into(), name: "Background Vocals".into(), index: 10, is_folder: false, muted: true, soloed: false },
-        TrackEntry { id: "trk-keys".into(), name: "Keys".into(), index: 11, is_folder: false, muted: false, soloed: false },
-    ]
+        let exec = item.actions.iter().find(|a| a.name == action).map(|a| a.exec.as_str()).unwrap_or("");
+        let parts: Vec<&str> = exec.splitn(3, ':').collect();
+        if parts.len() < 3 { return Ok(ActivationResult::Close); }
+        let (cmd, guid) = (parts[1], parts[2]);
+
+        let keep_open = daw::block_on(async {
+            let project = daw.current_project().await?;
+            let track = project.tracks().by_guid(guid).await?;
+            let Some(track) = track else { return Ok::<bool, daw::Error>(false); };
+            match cmd {
+                "track-select" => { track.select().await?; Ok(false) }
+                "track-solo" => { track.toggle_solo().await?; Ok(true) }
+                "track-mute" => { track.toggle_mute().await?; Ok(true) }
+                "track-fx" => {
+                    // Select the track first, then show FX via action
+                    track.select_exclusive().await?;
+                    daw.action_registry().execute_command(40291).await?; // Show FX chain for selected track
+                    Ok(false)
+                }
+                _ => Ok(false),
+            }
+        });
+
+        match keep_open {
+            Some(Ok(true)) => Ok(ActivationResult::KeepOpen),
+            _ => Ok(ActivationResult::Close),
+        }
+    }
 }

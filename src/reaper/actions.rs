@@ -1,137 +1,113 @@
-//! Reaper Actions provider.
+//! DAW Actions provider.
 //!
-//! Sources actions from the Reaper action list.
-//! In a full integration this would read from the Reaper API via reaper-rs.
-//! For now it provides a curated set of common actions.
+//! The action registry in the `daw` crate is for registering/executing actions,
+//! not enumerating them. For now, we provide a curated set of common actions.
+//! When running inside Reaper, the full action list can be read via
+//! the Reaper-specific API extension.
 
 use launcher_core::{
     ActionModifier, ActivationResult, Item, ItemAction, Provider, ProviderConfig,
 };
 
-pub struct ReaperActionsProvider {
+pub struct DawActionsProvider {
     config: ProviderConfig,
-    actions: Vec<ReaperAction>,
+    actions: Vec<Item>,
 }
 
-struct ReaperAction {
-    id: String,
-    name: String,
-    section: String,
-    command_id: String,
-}
-
-impl ReaperActionsProvider {
+impl DawActionsProvider {
     pub fn new() -> Self {
         Self {
             config: ProviderConfig {
-                name: "reaper-actions".into(),
+                name: "actions".into(),
                 icon: "A".into(),
-                prefix: None, // 'a' alias handles this via tags
+                prefix: None,
                 default_tags: vec!["reaper/actions".into()],
                 ..Default::default()
             },
             actions: Vec::new(),
         }
     }
-
-    fn load_actions(&mut self) {
-        // TODO: In a real Reaper extension, this would call the Reaper API:
-        // reaper.enum_actions() to get the full action list.
-        // For now, seed with common built-in actions.
-        self.actions = common_reaper_actions();
-        tracing::info!(count = self.actions.len(), "Loaded Reaper actions");
-    }
 }
 
-impl Provider for ReaperActionsProvider {
-    fn name(&self) -> &str {
-        "reaper-actions"
-    }
-    fn config(&self) -> &ProviderConfig {
-        &self.config
-    }
-    fn config_mut(&mut self) -> &mut ProviderConfig {
-        &mut self.config
-    }
+impl Provider for DawActionsProvider {
+    fn name(&self) -> &str { "actions" }
+    fn config(&self) -> &ProviderConfig { &self.config }
+    fn config_mut(&mut self) -> &mut ProviderConfig { &mut self.config }
 
     fn setup(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.load_actions();
+        self.actions = common_actions();
+        tracing::info!(count = self.actions.len(), "Loaded DAW actions");
         Ok(())
     }
 
-    fn query(
-        &self,
-        _query: &str,
-        _exact: bool,
-    ) -> Result<Vec<Item>, Box<dyn std::error::Error + Send + Sync>> {
-        let items = self
-            .actions
-            .iter()
-            .map(|action| {
-                let tag = format!("reaper/actions/{}", action.section.to_lowercase());
-                Item::new(&action.id, &action.name, "reaper-actions")
-                    .with_sub(&format!("Action: {} > {}", action.section, action.name))
-                    .with_icon("A")
-                    .with_tags(&["reaper/actions", &tag])
-                    .with_search_fields(vec![
-                        action.name.clone(),
-                        action.section.clone(),
-                        action.command_id.clone(),
-                    ])
-                    .with_actions(vec![
-                        ItemAction::new("Run", format!("reaper:{}", action.command_id)),
-                        ItemAction::new("Run (keep open)", format!("reaper:{}", action.command_id))
-                            .with_modifier(ActionModifier::Shift)
-                            .with_keep_open(),
-                    ])
-            })
-            .collect();
-        Ok(items)
+    fn query(&self, _q: &str, _exact: bool) -> Result<Vec<Item>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.actions.clone())
     }
 
-    fn activate(
-        &self,
-        item: &Item,
-        action: &str,
-    ) -> Result<ActivationResult, Box<dyn std::error::Error + Send + Sync>> {
-        tracing::info!(action = action, item = %item.label, "Reaper action");
-        // TODO: Call reaper.main_on_command() via reaper-rs
-        Ok(ActivationResult::Close)
+    fn activate(&self, item: &Item, action: &str) -> Result<ActivationResult, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(daw) = daw::get() else { return Ok(ActivationResult::Close); };
+
+        let exec = item.actions.iter().find(|a| a.name == action).map(|a| a.exec.as_str()).unwrap_or("");
+        let parts: Vec<&str> = exec.splitn(3, ':').collect();
+        if parts.len() < 3 { return Ok(ActivationResult::Close); }
+
+        let command_id: u32 = parts[2].parse().unwrap_or(0);
+        if command_id == 0 { return Ok(ActivationResult::Close); }
+
+        let keep_open = item.actions.iter().find(|a| a.name == action).map(|a| a.keep_open).unwrap_or(false);
+
+        daw::block_on(async {
+            daw.action_registry().execute_command(command_id).await.ok()
+        });
+
+        if keep_open { Ok(ActivationResult::KeepOpen) } else { Ok(ActivationResult::Close) }
     }
 }
 
-fn common_reaper_actions() -> Vec<ReaperAction> {
-    vec![
-        // Transport
-        ReaperAction { id: "ra-play".into(), name: "Play/Stop".into(), section: "Transport".into(), command_id: "1007".into() },
-        ReaperAction { id: "ra-record".into(), name: "Record".into(), section: "Transport".into(), command_id: "1013".into() },
-        ReaperAction { id: "ra-pause".into(), name: "Pause".into(), section: "Transport".into(), command_id: "1008".into() },
-        ReaperAction { id: "ra-stop".into(), name: "Stop".into(), section: "Transport".into(), command_id: "1016".into() },
-        ReaperAction { id: "ra-rewind".into(), name: "Go to start".into(), section: "Transport".into(), command_id: "40042".into() },
-        ReaperAction { id: "ra-repeat".into(), name: "Toggle repeat".into(), section: "Transport".into(), command_id: "1068".into() },
-        // File
-        ReaperAction { id: "ra-save".into(), name: "Save project".into(), section: "File".into(), command_id: "40026".into() },
-        ReaperAction { id: "ra-saveas".into(), name: "Save project as...".into(), section: "File".into(), command_id: "40022".into() },
-        ReaperAction { id: "ra-render".into(), name: "Render project to disk".into(), section: "File".into(), command_id: "40015".into() },
-        ReaperAction { id: "ra-open".into(), name: "Open project...".into(), section: "File".into(), command_id: "40025".into() },
-        ReaperAction { id: "ra-new".into(), name: "New project".into(), section: "File".into(), command_id: "40023".into() },
-        // Edit
-        ReaperAction { id: "ra-undo".into(), name: "Undo".into(), section: "Edit".into(), command_id: "40029".into() },
-        ReaperAction { id: "ra-redo".into(), name: "Redo".into(), section: "Edit".into(), command_id: "40030".into() },
-        ReaperAction { id: "ra-copy".into(), name: "Copy items".into(), section: "Edit".into(), command_id: "40057".into() },
-        ReaperAction { id: "ra-cut".into(), name: "Cut items".into(), section: "Edit".into(), command_id: "40059".into() },
-        ReaperAction { id: "ra-paste".into(), name: "Paste items".into(), section: "Edit".into(), command_id: "40058".into() },
-        ReaperAction { id: "ra-selectall".into(), name: "Select all items".into(), section: "Edit".into(), command_id: "40182".into() },
-        // Track
-        ReaperAction { id: "ra-addtrack".into(), name: "Insert new track".into(), section: "Track".into(), command_id: "40001".into() },
-        ReaperAction { id: "ra-deltrack".into(), name: "Remove selected tracks".into(), section: "Track".into(), command_id: "40005".into() },
-        ReaperAction { id: "ra-mutetrack".into(), name: "Toggle mute for selected tracks".into(), section: "Track".into(), command_id: "40281".into() },
-        ReaperAction { id: "ra-solotrack".into(), name: "Toggle solo for selected tracks".into(), section: "Track".into(), command_id: "40282".into() },
-        ReaperAction { id: "ra-armtrack".into(), name: "Toggle arm for selected tracks".into(), section: "Track".into(), command_id: "40294".into() },
-        // View
-        ReaperAction { id: "ra-mixer".into(), name: "Toggle mixer".into(), section: "View".into(), command_id: "40078".into() },
-        ReaperAction { id: "ra-fxbrowser".into(), name: "Show FX browser".into(), section: "View".into(), command_id: "40271".into() },
-        ReaperAction { id: "ra-actions".into(), name: "Show action list".into(), section: "View".into(), command_id: "40605".into() },
-        ReaperAction { id: "ra-routing".into(), name: "Show routing matrix".into(), section: "View".into(), command_id: "40251".into() },
-    ]
+fn common_actions() -> Vec<Item> {
+    let actions = [
+        ("play",     "Play/Stop",                "Transport", 1007),
+        ("record",   "Record",                   "Transport", 1013),
+        ("pause",    "Pause",                    "Transport", 1008),
+        ("stop",     "Stop",                     "Transport", 1016),
+        ("rewind",   "Go to start",              "Transport", 40042),
+        ("repeat",   "Toggle repeat",            "Transport", 1068),
+        ("save",     "Save project",             "File",      40026),
+        ("saveas",   "Save project as...",       "File",      40022),
+        ("render",   "Render project to disk",   "File",      40015),
+        ("open",     "Open project...",          "File",      40025),
+        ("new",      "New project",              "File",      40023),
+        ("undo",     "Undo",                     "Edit",      40029),
+        ("redo",     "Redo",                     "Edit",      40030),
+        ("copy",     "Copy items",               "Edit",      40057),
+        ("cut",      "Cut items",                "Edit",      40059),
+        ("paste",    "Paste items",              "Edit",      40058),
+        ("selall",   "Select all items",         "Edit",      40182),
+        ("addtrk",   "Insert new track",         "Track",     40001),
+        ("deltrk",   "Remove selected tracks",   "Track",     40005),
+        ("mute",     "Toggle mute",              "Track",     40281),
+        ("solo",     "Toggle solo",              "Track",     40282),
+        ("arm",      "Toggle arm",               "Track",     40294),
+        ("mixer",    "Toggle mixer",             "View",      40078),
+        ("fxbrow",   "Show FX browser",          "View",      40271),
+        ("actlist",  "Show action list",         "View",      40605),
+    ];
+
+    actions
+        .iter()
+        .map(|(id, name, section, cmd_id)| {
+            let tag = format!("reaper/actions/{}", section.to_lowercase());
+            Item::new(&format!("action-{id}"), *name, "actions")
+                .with_sub(&format!("Action: {section} > {name}"))
+                .with_icon("A")
+                .with_tags(&["reaper/actions", &tag])
+                .with_search_fields(vec![name.to_string(), section.to_string()])
+                .with_actions(vec![
+                    ItemAction::new("Run", format!("daw:action:{cmd_id}")),
+                    ItemAction::new("Run (keep open)", format!("daw:action:{cmd_id}"))
+                        .with_modifier(ActionModifier::Shift)
+                        .with_keep_open(),
+                ])
+        })
+        .collect()
 }

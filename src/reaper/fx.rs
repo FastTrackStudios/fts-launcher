@@ -1,32 +1,19 @@
-//! Reaper FX provider.
-//!
-//! Sources FX plugins from the Reaper FX database.
-//! In a full integration this reads from Reaper's plugin scan cache.
-//! For now provides demo entries.
+//! DAW FX provider — installed plugins from the DAW's FX database.
 
 use launcher_core::{
     ActionModifier, ActivationResult, Item, ItemAction, Provider, ProviderConfig,
 };
 
-pub struct ReaperFxProvider {
+pub struct DawFxProvider {
     config: ProviderConfig,
-    plugins: Vec<FxEntry>,
+    plugins: Vec<Item>,
 }
 
-struct FxEntry {
-    id: String,
-    name: String,
-    developer: String,
-    format: String,
-    is_instrument: bool,
-    category: String,
-}
-
-impl ReaperFxProvider {
+impl DawFxProvider {
     pub fn new() -> Self {
         Self {
             config: ProviderConfig {
-                name: "reaper-fx".into(),
+                name: "fx".into(),
                 icon: "F".into(),
                 prefix: Some('f'),
                 ..Default::default()
@@ -34,67 +21,117 @@ impl ReaperFxProvider {
             plugins: Vec::new(),
         }
     }
+
+    fn refresh(&mut self) {
+        let Some(daw) = daw::get() else { return; };
+
+        let installed = daw::block_on(async { daw.installed_plugins().await.ok() }).flatten();
+        let Some(installed) = installed else { return; };
+
+        self.plugins = installed
+            .iter()
+            .map(|fx| {
+                let (format, _name, developer) = parse_fx_ident(&fx.ident);
+
+                let is_instrument = fx.ident.to_lowercase().contains("instrument")
+                    || fx.ident.to_lowercase().contains("synth")
+                    || fx.ident.to_lowercase().contains("vsti");
+
+                let base_tag = if is_instrument { "audio/instruments" } else { "audio/effects" };
+                let format_tag = match format.to_lowercase().as_str() {
+                    "vst" | "vst2" => "audio/effects/plugin/vst",
+                    "vst3" => "audio/effects/plugin/vst3",
+                    "clap" => "audio/effects/plugin/clap",
+                    "js" | "jsfx" => "audio/effects/plugin/jsfx",
+                    "au" => "audio/effects/plugin/au",
+                    _ => "audio/effects/plugin",
+                };
+
+                let id = format!("fx-{}", fx.ident.replace(' ', "-").replace(':', "-").to_lowercase());
+
+                Item::new(&id, &fx.name, "fx")
+                    .with_sub(&format!("{developer} ({format})"))
+                    .with_icon("F")
+                    .with_tags(&[base_tag, format_tag])
+                    .with_search_fields(vec![fx.name.clone(), developer.clone(), format.clone()])
+                    .with_actions(vec![
+                        ItemAction::new("Add to track", format!("daw:fx-add:{}", fx.ident)),
+                        ItemAction::new("Add to new track", format!("daw:fx-new-track:{}", fx.ident))
+                            .with_modifier(ActionModifier::Shift),
+                        ItemAction::new("Replace chain", format!("daw:fx-replace:{}", fx.ident))
+                            .with_modifier(ActionModifier::CtrlShift),
+                    ])
+            })
+            .collect();
+
+        tracing::info!(count = self.plugins.len(), "Refreshed FX from DAW");
+    }
 }
 
-impl Provider for ReaperFxProvider {
-    fn name(&self) -> &str { "reaper-fx" }
+impl Provider for DawFxProvider {
+    fn name(&self) -> &str { "fx" }
     fn config(&self) -> &ProviderConfig { &self.config }
     fn config_mut(&mut self) -> &mut ProviderConfig { &mut self.config }
 
     fn setup(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // TODO: Read from Reaper's reaper-vstplugins64.ini or API
-        self.plugins = demo_fx_entries();
-        tracing::info!(count = self.plugins.len(), "Loaded Reaper FX");
+        self.refresh();
         Ok(())
     }
 
-    fn query(&self, _query: &str, _exact: bool) -> Result<Vec<Item>, Box<dyn std::error::Error + Send + Sync>> {
-        let items = self.plugins.iter().map(|fx| {
-            let base_tag = if fx.is_instrument { "audio/instruments" } else { "audio/effects" };
-            let format_tag = format!("audio/effects/plugin/{}", fx.format.to_lowercase());
-            let cat_tag = if !fx.category.is_empty() {
-                format!("{}/{}", base_tag, fx.category.to_lowercase())
-            } else {
-                base_tag.to_string()
-            };
-
-            Item::new(&fx.id, &fx.name, "reaper-fx")
-                .with_sub(&format!("{} — {} ({})", fx.developer, fx.category, fx.format))
-                .with_icon("F")
-                .with_tags(&[base_tag, &format_tag, &cat_tag])
-                .with_search_fields(vec![
-                    fx.name.clone(), fx.developer.clone(), fx.format.clone(), fx.category.clone(),
-                ])
-                .with_actions(vec![
-                    ItemAction::new("Add to track", format!("reaper:fx-add:{}", fx.id)),
-                    ItemAction::new("Add to new track", format!("reaper:fx-new-track:{}", fx.id))
-                        .with_modifier(ActionModifier::Shift),
-                    ItemAction::new("Replace chain", format!("reaper:fx-replace:{}", fx.id))
-                        .with_modifier(ActionModifier::CtrlShift),
-                ])
-        }).collect();
-        Ok(items)
+    fn query(&self, _q: &str, _exact: bool) -> Result<Vec<Item>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.plugins.clone())
     }
 
     fn activate(&self, item: &Item, action: &str) -> Result<ActivationResult, Box<dyn std::error::Error + Send + Sync>> {
-        tracing::info!(action = action, item = %item.label, "Reaper FX action");
+        let Some(daw) = daw::get() else { return Ok(ActivationResult::Close); };
+
+        let exec = item.actions.iter().find(|a| a.name == action).map(|a| a.exec.as_str()).unwrap_or("");
+        let parts: Vec<&str> = exec.splitn(3, ':').collect();
+        if parts.len() < 3 { return Ok(ActivationResult::Close); }
+        let (cmd, fx_ident) = (parts[1], parts[2]);
+
+        daw::block_on(async {
+            let project = daw.current_project().await?;
+            match cmd {
+                "fx-add" => {
+                    let selected = project.tracks().selected().await?;
+                    if let Some(track) = selected.first() {
+                        track.fx_chain().add(fx_ident).await?;
+                    }
+                }
+                "fx-new-track" => {
+                    let count = project.tracks().count().await?;
+                    let new_track = project.tracks().add(&item.label, Some(count)).await?;
+                    new_track.fx_chain().add(fx_ident).await?;
+                }
+                "fx-replace" => {
+                    let selected = project.tracks().selected().await?;
+                    for track in &selected {
+                        let chain = track.fx_chain();
+                        let count = chain.count().await?;
+                        for i in (0..count).rev() {
+                            if let Some(fx) = chain.by_index(i).await? {
+                                fx.remove().await?;
+                            }
+                        }
+                        chain.add(fx_ident).await?;
+                    }
+                }
+                _ => {}
+            }
+            Ok::<(), daw::Error>(())
+        });
+
         Ok(ActivationResult::Close)
     }
 }
 
-fn demo_fx_entries() -> Vec<FxEntry> {
-    vec![
-        FxEntry { id: "fx-reaverbate".into(), name: "ReaVerbate".into(), developer: "Cockos".into(), format: "VST".into(), is_instrument: false, category: "reverb".into() },
-        FxEntry { id: "fx-reaeq".into(), name: "ReaEQ".into(), developer: "Cockos".into(), format: "VST".into(), is_instrument: false, category: "eq".into() },
-        FxEntry { id: "fx-reacomp".into(), name: "ReaComp".into(), developer: "Cockos".into(), format: "VST".into(), is_instrument: false, category: "dynamics".into() },
-        FxEntry { id: "fx-readelay".into(), name: "ReaDelay".into(), developer: "Cockos".into(), format: "VST".into(), is_instrument: false, category: "delay".into() },
-        FxEntry { id: "fx-reagate".into(), name: "ReaGate".into(), developer: "Cockos".into(), format: "VST".into(), is_instrument: false, category: "dynamics".into() },
-        FxEntry { id: "fx-reafir".into(), name: "ReaFir".into(), developer: "Cockos".into(), format: "VST".into(), is_instrument: false, category: "eq".into() },
-        FxEntry { id: "fx-reastream".into(), name: "ReaStream".into(), developer: "Cockos".into(), format: "VST".into(), is_instrument: false, category: "utility".into() },
-        FxEntry { id: "fx-vital".into(), name: "Vital".into(), developer: "Matt Tytel".into(), format: "VST3".into(), is_instrument: true, category: "synth".into() },
-        FxEntry { id: "fx-samplomatic".into(), name: "ReaSamplomatic5000".into(), developer: "Cockos".into(), format: "VST".into(), is_instrument: true, category: "sampler".into() },
-        FxEntry { id: "fx-pianoone".into(), name: "Piano One".into(), developer: "SoundMagic".into(), format: "VST".into(), is_instrument: true, category: "piano".into() },
-        FxEntry { id: "fx-surgext".into(), name: "Surge XT".into(), developer: "Surge Synth Team".into(), format: "CLAP".into(), is_instrument: true, category: "synth".into() },
-        FxEntry { id: "fx-dexed".into(), name: "Dexed".into(), developer: "Digital Suburban".into(), format: "VST3".into(), is_instrument: true, category: "synth".into() },
-    ]
+fn parse_fx_ident(ident: &str) -> (String, String, String) {
+    let (format, rest) = ident.split_once(": ").unwrap_or(("Unknown", ident));
+    let (name, developer) = if let Some(paren_start) = rest.rfind('(') {
+        (rest[..paren_start].trim().to_string(), rest[paren_start + 1..].trim_end_matches(')').trim().to_string())
+    } else {
+        (rest.to_string(), String::new())
+    };
+    (format.to_string(), name, developer)
 }

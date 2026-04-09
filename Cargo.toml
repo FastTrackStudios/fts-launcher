@@ -12,10 +12,14 @@ desktop = ["dep:dioxus", "launcher-ui/desktop"]
 native = ["dep:dioxus-native", "dep:winit", "launcher-ui/native"]
 
 [dependencies]
-# Core launcher engine and UI (use local path for development, switch to git for release)
+# Core launcher engine and UI
 launcher-core = { path = "../dioxus-launcher/crates/launcher-core" }
 launcher-ui = { path = "../dioxus-launcher/crates/launcher-ui", default-features = false }
 providers = { path = "../dioxus-launcher/crates/providers" }
+
+# DAW API (safe Rust, async, generic)
+daw = { path = "../daw/crates/daw", features = ["standalone"] }
+tokio = { version = "1", features = ["rt", "macros"] }
 
 # Renderers
 dioxus = { version = "0.7", features = ["desktop"], optional = true }
