@@ -16,7 +16,8 @@ impl DawModule for LauncherModule {
         vec![
             ActionDef::new("FTS_LAUNCHER_TOGGLE", "FTS: Toggle Launcher", || {
                 tracing::info!("FTS Launcher toggle");
-            }),
+            })
+            .in_menu(),
             ActionDef::new(
                 "FTS_LAUNCHER_FOCUS",
                 "FTS: Focus Launcher Search",
