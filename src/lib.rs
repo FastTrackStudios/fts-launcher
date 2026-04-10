@@ -18,6 +18,7 @@
 //! // Render: Launcher { state, theme: LauncherEngine::theme(), on_close: ... }
 //! ```
 
+pub mod daw_module;
 pub mod reaper;
 
 use std::sync::Arc;
