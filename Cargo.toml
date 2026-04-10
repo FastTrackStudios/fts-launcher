@@ -3,25 +3,35 @@ name = "fts-launcher"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "FastTrackStudios launcher for Reaper — audio production workflow launcher"
+description = "FastTrackStudios launcher for Reaper — audio production workflow launcher library"
 repository = "https://github.com/FastTrackStudios/fts-launcher"
 
+[lib]
+name = "fts_launcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fts-launcher"
+path = "src/main.rs"
+required-features = ["standalone"]
+
 [features]
-default = ["native"]
-desktop = ["dep:dioxus", "launcher-ui/desktop"]
-native = ["dep:dioxus-native", "dep:winit", "launcher-ui/native"]
+default = []
+standalone = ["native", "dep:dioxus-native", "dep:winit", "dep:tracing-subscriber"]
+desktop = ["ui", "dep:dioxus", "launcher-ui/desktop"]
+native = ["ui", "launcher-ui/native"]
+ui = ["dep:launcher-ui"]
 
 [dependencies]
-# Core launcher engine and UI
+# Core launcher engine
 launcher-core = { path = "../dioxus-launcher/crates/launcher-core" }
-launcher-ui = { path = "../dioxus-launcher/crates/launcher-ui", default-features = false }
+launcher-ui = { path = "../dioxus-launcher/crates/launcher-ui", default-features = false, optional = true }
 providers = { path = "../dioxus-launcher/crates/providers" }
 
 # DAW API (safe Rust, async, generic)
-daw = { path = "../daw/crates/daw", features = ["standalone"] }
-tokio = { version = "1", features = ["rt", "macros"] }
+daw = { path = "../daw/crates/daw" }
 
-# Renderers
+# Renderers (optional — the host app provides the window)
 dioxus = { version = "0.7", features = ["desktop"], optional = true }
 dioxus-native = { git = "https://github.com/FastTrackStudios/blitz", features = ["prelude"], optional = true }
 winit = { version = "=0.31.0-beta.2", optional = true }
@@ -34,4 +44,4 @@ facet-styx = "3.0"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
