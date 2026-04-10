@@ -1,19 +1,21 @@
-//! FTS Launcher — library for embedding the launcher in Reaper extensions.
+//! FTS Launcher — Dioxus-native launcher for Reaper.
 //!
-//! # Usage from a Reaper extension
+//! This crate provides the full launcher: engine, UI components, providers,
+//! and Dioxus rendering via the Blitz native renderer.
+//!
+//! # Embedding in a Reaper extension
 //!
 //! ```rust,ignore
-//! use fts_launcher::{LauncherEngine, ActionDefs};
+//! // In your extension's plugin_main:
+//! let engine = fts_launcher::LauncherEngine::new();
 //!
-//! // In plugin_main:
-//! let engine = LauncherEngine::new();
+//! // Register launcher actions with REAPER
+//! for (id, name, handler) in engine.action_defs() { ... }
 //!
-//! // Get action definitions to register with REAPER
-//! let actions = engine.action_defs();
-//! // Register actions via daw.action_registry()...
-//!
-//! // When "FTS_LAUNCHER_TOGGLE" action is triggered:
-//! engine.toggle();
+//! // The Launcher Dioxus component can be embedded in a reaper-dioxus panel:
+//! use fts_launcher::ui::{Launcher, LauncherState};
+//! let state = engine.into_state();
+//! // Render: Launcher { state, theme: LauncherEngine::theme(), on_close: ... }
 //! ```
 
 pub mod reaper;
@@ -23,24 +25,29 @@ use std::sync::Arc;
 use launcher_core::{FilterState, QueryEngine};
 use providers::{CalcProvider, ExtensionProvider, WorkflowProvider};
 
+// Re-export everything consumers need
 pub use launcher_core;
-
-#[cfg(feature = "ui")]
 pub use launcher_ui;
+pub use dioxus_native;
+
+/// Re-export the UI components under a convenient path.
+pub mod ui {
+    pub use launcher_ui::components::Launcher;
+    pub use launcher_ui::state::LauncherState;
+    pub use launcher_ui::theme::Theme;
+}
 
 /// Action handler type: (command_id, display_name, handler).
 pub type ActionDef = (String, String, Arc<dyn Fn() + Send + Sync>);
 
 /// The launcher engine — holds the query engine, providers, and configuration.
-/// Created once at extension startup, used to build UI and handle actions.
 pub struct LauncherEngine {
     engine: QueryEngine,
-    ext_registry: launcher_core::ExtensionRegistry,
+    _ext_registry: launcher_core::ExtensionRegistry,
 }
 
 impl LauncherEngine {
-    /// Create a new launcher engine, loading packs and extensions from
-    /// standard directories.
+    /// Create a new launcher engine, loading packs and extensions.
     pub fn new() -> Self {
         // Load workflow packs
         let mut loaded_packs = Vec::new();
@@ -78,13 +85,11 @@ impl LauncherEngine {
             .magic_word("A", "Actions")
             .magic_word("V", "Visibility")
             .magic_word("T", "Tracks")
-            // DAW-powered providers
             .provider(Box::new(reaper::DawTracksProvider::new()))
             .provider(Box::new(reaper::DawFxProvider::new()))
             .provider(Box::new(reaper::DawActionsProvider::new()))
             .provider(Box::new(reaper::DawMarkersProvider::new()))
             .provider(Box::new(reaper::DawTransportProvider::new()))
-            // Generic providers
             .provider(Box::new(CalcProvider::new()))
             .provider(Box::new(WorkflowProvider::from_items(
                 loaded_packs.iter().flat_map(|p| p.to_items()).collect(),
@@ -128,58 +133,53 @@ impl LauncherEngine {
             }
         }
 
-        tracing::info!(
-            providers = engine.provider_names().len(),
-            "FTS Launcher engine initialized"
-        );
+        tracing::info!(providers = engine.provider_names().len(), "FTS Launcher ready");
 
-        Self { engine, ext_registry }
+        Self {
+            engine,
+            _ext_registry: ext_registry,
+        }
     }
 
     /// Get the query engine.
-    pub fn into_engine(self) -> QueryEngine {
-        self.engine
-    }
-
-    /// Get a reference to the query engine.
     pub fn engine(&self) -> &QueryEngine {
         &self.engine
     }
 
-    /// Create a LauncherState for use with the Dioxus UI.
-    #[cfg(feature = "ui")]
-    pub fn into_state(self) -> launcher_ui::state::LauncherState {
-        launcher_ui::state::LauncherState::new(self.engine)
+    /// Consume into the query engine.
+    pub fn into_engine(self) -> QueryEngine {
+        self.engine
     }
 
-    /// Get the FTS dark theme.
-    #[cfg(feature = "ui")]
-    pub fn theme() -> launcher_ui::theme::Theme {
-        let mut theme = launcher_ui::theme::Theme::dark();
+    /// Create a LauncherState for the Dioxus UI.
+    pub fn into_state(self) -> ui::LauncherState {
+        ui::LauncherState::new(self.engine)
+    }
+
+    /// The FTS dark theme (Catppuccin Mocha + pink accent).
+    pub fn theme() -> ui::Theme {
+        let mut theme = ui::Theme::dark();
         theme.name = "fts-dark".into();
         theme.accent = "#f5c2e7".into();
         theme.accent_hover = "#f5c2e7".into();
         theme
     }
 
-    /// Build action definitions for registering with REAPER.
-    /// Returns tuples of (command_id, display_name, handler).
+    /// Action definitions for REAPER registration.
     pub fn action_defs() -> Vec<ActionDef> {
         vec![
             (
                 "FTS_LAUNCHER_TOGGLE".to_string(),
                 "FTS: Toggle Launcher".to_string(),
                 Arc::new(|| {
-                    tracing::info!("FTS Launcher toggle requested");
-                    // The actual toggle is handled by the extension host
-                    // which owns the window/panel lifecycle.
+                    tracing::info!("FTS Launcher toggle");
                 }),
             ),
             (
                 "FTS_LAUNCHER_FOCUS".to_string(),
                 "FTS: Focus Launcher Search".to_string(),
                 Arc::new(|| {
-                    tracing::info!("FTS Launcher focus requested");
+                    tracing::info!("FTS Launcher focus");
                 }),
             ),
         ]
